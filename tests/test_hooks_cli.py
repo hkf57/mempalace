@@ -16,6 +16,7 @@ from mempalace.hooks_cli import (
     _get_mine_targets,
     _log,
     _maybe_auto_ingest,
+    _mcp_holder_pid,
     _mempalace_python,
     _mine_already_running,
     _mine_sync,
@@ -1065,3 +1066,66 @@ def test_regular_file_at_palace_root_treated_as_absent(tmp_path, monkeypatch):
     # The stray file is left untouched; we never try to convert it.
     assert fake_root.is_file()
     assert fake_root.read_text() == "oops, this is a file not a directory"
+
+
+# --- _mcp_holder_pid ---
+
+
+def test_mcp_holder_pid_no_lock_file_returns_none(tmp_path, monkeypatch):
+    """Returns None when the singleton lock file does not exist."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert _mcp_holder_pid() is None
+
+
+def test_mcp_holder_pid_unflocked_lock_returns_none(tmp_path, monkeypatch):
+    """A stale lock file with a PID but no flock holder reads as no-MCP-up."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    lock_path = tmp_path / ".mempalace" / "locks" / "mcp_singleton.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("99999")
+    assert _mcp_holder_pid() is None
+
+
+def test_mcp_holder_pid_held_returns_holder(tmp_path, monkeypatch):
+    """When another fd holds the flock, returns the PID written to the file."""
+    if os.name == "nt":
+        pytest.skip("flock semantics are POSIX-specific in this test")
+    import fcntl
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    lock_path = tmp_path / ".mempalace" / "locks" / "mcp_singleton.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("12345")
+    holder_fd = open(lock_path, "a")
+    try:
+        fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert _mcp_holder_pid() == 12345
+    finally:
+        fcntl.flock(holder_fd, fcntl.LOCK_UN)
+        holder_fd.close()
+
+
+def test_maybe_auto_ingest_skips_when_mcp_holder_live(tmp_path, monkeypatch):
+    """Hook spawn is skipped when an MCP holder owns the singleton lock."""
+    if os.name == "nt":
+        pytest.skip("flock semantics are POSIX-specific in this test")
+    import fcntl
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MEMPAL_DISABLE_AUTO_INGEST", raising=False)
+    lock_path = tmp_path / ".mempalace" / "locks" / "mcp_singleton.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("777")
+    holder_fd = open(lock_path, "a")
+    try:
+        fcntl.flock(holder_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        mempal_dir = tmp_path / "project"
+        mempal_dir.mkdir()
+        with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
+            with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+                with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
+                    _maybe_auto_ingest()
+                    mock_popen.assert_not_called()
+    finally:
+        fcntl.flock(holder_fd, fcntl.LOCK_UN)
+        holder_fd.close()
