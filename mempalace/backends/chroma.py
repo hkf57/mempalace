@@ -1045,8 +1045,12 @@ class ChromaBackend(BaseBackend):
         )
 
         if cached is None or inode_changed or mtime_changed or mtime_appeared:
-            ChromaBackend._prepare_palace_for_open(palace_path)
-            cached = chromadb.PersistentClient(path=palace_path)
+            # Late import — palace.py imports ChromaBackend from this module.
+            from ..palace import chroma_open_lock
+
+            with chroma_open_lock(palace_path):
+                ChromaBackend._prepare_palace_for_open(palace_path)
+                cached = chromadb.PersistentClient(path=palace_path)
             self._clients[palace_path] = cached
             # Re-stat after the client constructor runs: chromadb creates
             # chroma.sqlite3 lazily, so the stat captured before the call
@@ -1117,8 +1121,12 @@ class ChromaBackend(BaseBackend):
         :attr:`_quarantined_paths` for the rationale (cold-start protection
         vs. runtime thrash on steady-write daemons).
         """
-        ChromaBackend._prepare_palace_for_open(palace_path)
-        return chromadb.PersistentClient(path=palace_path)
+        # Late import — palace.py imports ChromaBackend from this module.
+        from ..palace import chroma_open_lock
+
+        with chroma_open_lock(palace_path):
+            ChromaBackend._prepare_palace_for_open(palace_path)
+            return chromadb.PersistentClient(path=palace_path)
 
     @staticmethod
     def backend_version() -> str:

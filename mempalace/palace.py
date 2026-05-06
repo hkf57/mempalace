@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 import threading
+import time
 
 from .backends.chroma import ChromaBackend
 
@@ -447,6 +448,83 @@ def mine_palace_lock(palace_path: str):
 # lock). Kept so third-party callers that imported it continue to work; new
 # code should use `mine_palace_lock(palace_path)` for per-palace scoping.
 mine_global_lock = mine_palace_lock
+
+
+@contextlib.contextmanager
+def chroma_open_lock(palace_path: str, timeout: float = 30.0):
+    """Per-palace blocking exclusive lock around chromadb client open/close.
+
+    Unlike `mine_palace_lock` (non-blocking, raises MineAlreadyRunning on
+    contention), this lock waits up to `timeout` seconds for the lock to
+    become free, then proceeds. Used to serialize PersistentClient
+    instantiation across processes — concurrent attaches to the same
+    on-disk palace can SIGSEGV inside chromadb's HNSW init when another
+    process is mid-write.
+
+    Shares the same lock file as mine_palace_lock so a running mine
+    blocks new client attaches and vice-versa. Re-entrant within the
+    same thread (uses _palace_lock_holders bookkeeping) so a code path
+    that already holds mine_palace_lock won't deadlock when constructing
+    a client inside the lock.
+    """
+    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    resolved = os.path.realpath(os.path.expanduser(palace_path))
+    lock_key_source = os.path.normcase(resolved)
+    palace_key = hashlib.sha256(lock_key_source.encode()).hexdigest()[:16]
+    lock_path = os.path.join(lock_dir, f"mine_palace_{palace_key}.lock")
+
+    if _held_by_this_thread(palace_key):
+        yield
+        return
+
+    lf = open(lock_path, "w")
+    acquired = False
+    deadline = time.monotonic() + timeout
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
+                    acquired = True
+                    break
+                except OSError:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"chroma_open_lock timed out waiting for {resolved}")
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError(f"chroma_open_lock timed out waiting for {resolved}")
+                    time.sleep(0.05)
+        _mark_held(palace_key)
+        try:
+            yield
+        finally:
+            _mark_released(palace_key)
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+            except Exception:
+                pass
+        lf.close()
 
 
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:
