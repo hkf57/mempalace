@@ -488,6 +488,8 @@ def _save_diary_direct(
 
 def _ingest_transcript(transcript_path: str):
     """Mine a Claude Code session transcript into the palace as a conversation."""
+    if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
+        return
     path = Path(transcript_path).expanduser()
     if not path.is_file() or path.stat().st_size < 100:
         return
