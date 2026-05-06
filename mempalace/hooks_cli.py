@@ -289,6 +289,60 @@ def _spawn_mine(cmd: list) -> None:
     _MINE_PID_FILE.write_text(str(proc.pid))
 
 
+def _mcp_holder_pid():
+    """Probe the MCP singleton lock; return holder PID if live, else None.
+
+    The MCP server holds an exclusive flock on
+    ``~/.mempalace/locks/mcp_singleton.lock`` for its lifetime. A hook
+    subprocess that opens its own chromadb client while the MCP is up
+    races with it on HNSW writes and SIGSEGVs the Rust bindings. We
+    probe non-destructively (open with mode ``"a"`` so we never truncate
+    the PID, take LOCK_EX|LOCK_NB, release on success).
+
+    Returns ``None`` if no MCP is running, ``-1`` if one is running but
+    the PID can't be read, or the holder's PID otherwise.
+    """
+    lock_path = Path.home() / ".mempalace" / "locks" / "mcp_singleton.lock"
+    if not lock_path.is_file():
+        return None
+    try:
+        fd = open(lock_path, "a")
+    except OSError:
+        return None
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                try:
+                    return int(lock_path.read_text().strip())
+                except (OSError, ValueError):
+                    return -1
+            try:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            return None
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                return int(lock_path.read_text().strip())
+            except (OSError, ValueError):
+                return -1
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return None
+    finally:
+        fd.close()
+
+
 def _maybe_auto_ingest():
     """Background-mine MEMPAL_DIR (project files) if set.
 
@@ -298,6 +352,10 @@ def _maybe_auto_ingest():
     targets fire from a single hook call (#1231 review).
     """
     if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
+        return
+    holder = _mcp_holder_pid()
+    if holder is not None:
+        _log(f"Skipping auto-ingest: MCP holder pid={holder} owns palace")
         return
     targets = _get_mine_targets()
     if not targets:
@@ -320,6 +378,10 @@ def _mine_sync():
     timeout stacking against the harness 30s ceiling (#1231 review).
     """
     if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
+        return
+    holder = _mcp_holder_pid()
+    if holder is not None:
+        _log(f"Skipping precompact mine: MCP holder pid={holder} owns palace")
         return
     targets = _get_mine_targets()
     if not targets:
@@ -443,6 +505,10 @@ def _save_diary_direct(
     """
     if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
         return {"count": 0}
+    holder = _mcp_holder_pid()
+    if holder is not None:
+        _log(f"Skipping diary checkpoint: MCP holder pid={holder} owns palace")
+        return {"count": 0}
     messages = _extract_recent_messages(transcript_path)
     if not messages:
         _log("No recent messages to save")
@@ -491,6 +557,10 @@ def _save_diary_direct(
 def _ingest_transcript(transcript_path: str):
     """Mine a Claude Code session transcript into the palace as a conversation."""
     if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
+        return
+    holder = _mcp_holder_pid()
+    if holder is not None:
+        _log(f"Skipping transcript ingest: MCP holder pid={holder} owns palace")
         return
     path = Path(transcript_path).expanduser()
     if not path.is_file() or path.stat().st_size < 100:
