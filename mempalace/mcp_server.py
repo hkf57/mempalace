@@ -2086,6 +2086,63 @@ def _restore_stdout():
     sys.stdout = _REAL_STDOUT
 
 
+_SINGLETON_LOCK_FD = None  # kept alive for process lifetime — close = release
+
+
+def _acquire_singleton_lock():
+    """Refuse to start if another mempalace MCP server is already running.
+
+    Multiple MCP servers attached to the same chromadb palace race on writes
+    and SIGSEGV in chromadb's HNSW Rust bindings. Enforcing one MCP server
+    at startup converts the silent SIGSEGV into a clean error so the user
+    can kill the existing holder and switch.
+
+    Lock file: ``~/.mempalace/locks/mcp_singleton.lock``. Held via flock for
+    the process lifetime — kernel releases automatically on exit. The file
+    is also written with the holder's PID for easy diagnosis.
+
+    POSIX uses ``fcntl.flock`` (LOCK_EX | LOCK_NB). Windows uses
+    ``msvcrt.locking`` (LK_NBLCK).
+    """
+    global _SINGLETON_LOCK_FD
+    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, "mcp_singleton.lock")
+    # Open with "a" so we don't truncate the holder's PID before reading it
+    # back — mode "w" wipes the file on open, defeating the diagnostic message.
+    fd = open(lock_path, "a")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(fd.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise BlockingIOError("singleton lock held") from exc
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            holder = open(lock_path).read().strip()
+        except OSError:
+            holder = "unknown"
+        sys.stderr.write(
+            "[mempalace] another mempalace MCP server is already running "
+            f"(holder PID: {holder}).\n"
+            "Kill it before starting a new MCP server here:\n"
+            f"  kill {holder}\n"
+        )
+        fd.close()
+        sys.exit(0)
+    fd.seek(0)
+    fd.truncate()
+    fd.write(str(os.getpid()))
+    fd.flush()
+    _SINGLETON_LOCK_FD = fd
+
+
 def main():
     _restore_stdout()
     # Force UTF-8 on stdio. MCP JSON-RPC is UTF-8, but Python on Windows
@@ -2098,6 +2155,7 @@ def main():
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except (AttributeError, OSError):
                 pass
+    _acquire_singleton_lock()
     logger.info("MemPalace MCP Server starting...")
     # Pre-flight: probe HNSW capacity before any tool call so the warning
     # is visible at startup rather than on first use (#1222). Pure
