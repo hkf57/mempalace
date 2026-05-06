@@ -27,7 +27,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "chromadb>=1.5.0,<1.5.4",  # cap: chromadb 1.5.4+ Rust bindings UAF on macOS 26 ARM64 (#1376)
+    "chromadb>=1.5.0,<=1.5.0",  # cap: chromadb 1.5.4+ Rust bindings UAF on macOS 26 ARM64 (#1376); 1.5.2 and 1.5.3 also crash on this palace shape, only 1.5.0 verified clean
     "pyyaml>=6.0,<7",
     "tomli>=2.0.0; python_version < '3.11'",
 ]
