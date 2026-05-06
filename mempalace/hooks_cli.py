@@ -441,6 +441,8 @@ def _save_diary_direct(
 
     Returns {"count": N, "themes": [...]} on success, {"count": 0} on failure.
     """
+    if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
+        return {"count": 0}
     messages = _extract_recent_messages(transcript_path)
     if not messages:
         _log("No recent messages to save")
