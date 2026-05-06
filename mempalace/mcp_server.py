@@ -2108,9 +2108,22 @@ def _acquire_singleton_lock():
     lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
     os.makedirs(lock_dir, exist_ok=True)
     lock_path = os.path.join(lock_dir, "mcp_singleton.lock")
+    diag_path = os.path.join(lock_dir, "mcp_singleton.diag")
+    pid = os.getpid()
+
+    def _diag(msg: str) -> None:
+        """Append a diagnostic line so we can trace why a singleton check
+        was bypassed when sys.stderr is consumed by the host process."""
+        try:
+            with open(diag_path, "a") as df:
+                df.write(f"[{datetime.now().isoformat()}] pid={pid} {msg}\n")
+        except OSError:
+            pass
+
     # Open with "a" so we don't truncate the holder's PID before reading it
     # back — mode "w" wipes the file on open, defeating the diagnostic message.
     fd = open(lock_path, "a")
+    _diag(f"opened lock_path fd={fd.fileno()}")
     try:
         if os.name == "nt":
             import msvcrt
@@ -2122,12 +2135,21 @@ def _acquire_singleton_lock():
         else:
             import fcntl
 
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                _diag("flock acquired")
+            except OSError as exc:
+                # Some platforms / kernels surface contention as plain
+                # OSError(EAGAIN/EWOULDBLOCK) rather than BlockingIOError.
+                # Coerce so we hit the singleton-already-running branch.
+                _diag(f"flock raised {type(exc).__name__}: {exc}")
+                raise BlockingIOError("singleton lock held") from exc
     except BlockingIOError:
         try:
             holder = open(lock_path).read().strip()
         except OSError:
             holder = "unknown"
+        _diag(f"refusing to start, holder={holder}, exiting 0")
         sys.stderr.write(
             "[mempalace] another mempalace MCP server is already running "
             f"(holder PID: {holder}).\n"
@@ -2138,9 +2160,10 @@ def _acquire_singleton_lock():
         sys.exit(0)
     fd.seek(0)
     fd.truncate()
-    fd.write(str(os.getpid()))
+    fd.write(str(pid))
     fd.flush()
     _SINGLETON_LOCK_FD = fd
+    _diag("became holder")
 
 
 def main():
