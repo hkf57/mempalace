@@ -297,6 +297,8 @@ def _maybe_auto_ingest():
     asymmetric interpreter handling and PID-file overwrite when both
     targets fire from a single hook call (#1231 review).
     """
+    if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
+        return
     targets = _get_mine_targets()
     if not targets:
         return
@@ -317,6 +319,8 @@ def _mine_sync():
     in ``hook_precompact`` — keeping them out of this function avoids
     timeout stacking against the harness 30s ceiling (#1231 review).
     """
+    if os.environ.get("MEMPAL_DISABLE_AUTO_INGEST"):
+        return
     targets = _get_mine_targets()
     if not targets:
         return
